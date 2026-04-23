@@ -1,0 +1,9 @@
+.claude/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.code-workspace
+
+
