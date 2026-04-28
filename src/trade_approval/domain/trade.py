@@ -47,10 +47,6 @@ class Trade:
         return self.events[-1].details_version
 
     @property
-    def max_version(self) -> int:
-        return max(e.details_version for e in self.events)
-
-    @property
     def requester_id(self) -> str:
         # The user who created the trade is the requester.
         return self.events[0].user_id

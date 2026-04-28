@@ -6,12 +6,12 @@ The service is the public library surface — callable without the HTTP layer.
 from decimal import Decimal
 from typing import Any, Optional
 
-from ..domain.errors import IllegalTransitionError, UnauthorizedActionError
+from ..domain.errors import UnauthorizedActionError
 from ..domain.events import TradeEvent, utc_now
 from ..domain.states import Action, State
 from ..domain.trade import Trade
 from ..domain.details import TradeDetails
-from ..domain.workflow import TRANSITIONS, AuthRule
+from ..domain.workflow import AuthRule, Transition, lookup
 from ..repo.in_memory import InMemoryTradeRepository
 
 
@@ -66,15 +66,11 @@ class TradeService:
         """Update trade details (approver-only) and move to NeedsReapproval."""
         with self._repo.lock:
             trade = self._repo.get(trade_id)
-            self._check_transition(trade, Action.UPDATE, user_id)
+            transition = self._authorize(trade, Action.UPDATE, user_id)
             new_details = trade.current_details.with_updates(updates)
-            trade.append(self._make_event(
-                trade=trade,
-                action=Action.UPDATE,
-                user_id=user_id,
-                new_details=new_details,
-                bump_version=True,
-                note=note,
+            trade.append(self._build_event(
+                trade, Action.UPDATE, user_id, transition, new_details,
+                bump_version=True, note=note,
             ))
             self._repo.save(trade)
             return trade
@@ -89,15 +85,11 @@ class TradeService:
         """Book the trade with the executed strike. Moves to Executed state."""
         with self._repo.lock:
             trade = self._repo.get(trade_id)
-            self._check_transition(trade, Action.BOOK, user_id)
+            transition = self._authorize(trade, Action.BOOK, user_id)
             new_details = trade.current_details.with_updates({"strike": strike})
-            trade.append(self._make_event(
-                trade=trade,
-                action=Action.BOOK,
-                user_id=user_id,
-                new_details=new_details,
-                bump_version=True,
-                note=note,
+            trade.append(self._build_event(
+                trade, Action.BOOK, user_id, transition, new_details,
+                bump_version=True, note=note,
             ))
             self._repo.save(trade)
             return trade
@@ -113,46 +105,41 @@ class TradeService:
     ) -> Trade:
         with self._repo.lock:
             trade = self._repo.get(trade_id)
-            self._check_transition(trade, action, user_id)
-            trade.append(self._make_event(
-                trade=trade,
-                action=action,
-                user_id=user_id,
-                new_details=trade.current_details,
-                bump_version=False,
-                note=note,
+            transition = self._authorize(trade, action, user_id)
+            trade.append(self._build_event(
+                trade, action, user_id, transition, trade.current_details,
+                bump_version=False, note=note,
             ))
             self._repo.save(trade)
             return trade
 
-    def _make_event(
-        self,
+    def _authorize(self, trade: Trade, action: Action, user_id: str) -> Transition:
+        """Resolve the transition and enforce its auth rule. Raises on either failure."""
+        transition = lookup(trade.state, action)
+        self._check_auth(trade, user_id, transition.auth_rule)
+        return transition
+
+    @staticmethod
+    def _build_event(
         trade: Trade,
         action: Action,
         user_id: str,
+        transition: Transition,
         new_details: TradeDetails,
         bump_version: bool,
         note: Optional[str],
     ) -> TradeEvent:
-        to_state, _ = TRANSITIONS[(trade.state, action)]
         return TradeEvent(
             seq=len(trade.events) + 1,
             action=action,
             user_id=user_id,
             timestamp=utc_now(),
             from_state=trade.state,
-            to_state=to_state,
+            to_state=transition.to_state,
             details_version=trade.current_version + (1 if bump_version else 0),
             details_snapshot=new_details,
             note=note,
         )
-
-    def _check_transition(self, trade: Trade, action: Action, user_id: str) -> None:
-        key = (trade.state, action)
-        if key not in TRANSITIONS:
-            raise IllegalTransitionError(trade.state, action)
-        _, rule = TRANSITIONS[key]
-        self._check_auth(trade, user_id, rule)
 
     @staticmethod
     def _check_auth(trade: Trade, user_id: str, rule: AuthRule) -> None:
